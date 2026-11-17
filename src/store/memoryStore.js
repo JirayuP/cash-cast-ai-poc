@@ -14,6 +14,14 @@ let nextId = 1;
  * @param {string} [params.rawInput] - ข้อความต้นฉบับ หรือข้อความดิบจาก OCR
  */
 function addTransaction({ userId, channel, extractedData, rawInput = '' }) {
+  const now = new Date();
+  const recordedTime = `${new Intl.DateTimeFormat('th-TH', {
+    timeZone: 'Asia/Bangkok',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(now)} น.`;
+
   const record = {
     id: nextId++,
     userId: userId || 'anonymous',
@@ -23,9 +31,10 @@ function addTransaction({ userId, channel, extractedData, rawInput = '' }) {
     amount: Number(extractedData.amount) || 0,
     category: extractedData.category,
     date: extractedData.date,
+    time: recordedTime,
     items: Array.isArray(extractedData.items) ? extractedData.items : [],
     rawInput,
-    createdAt: new Date().toISOString(),
+    createdAt: now.toISOString(),
   };
 
   transactions.unshift(record); // เก็บรายการล่าสุดไว้บนสุด

@@ -17,6 +17,12 @@ function buildTransactionReplyMessages(data, channel = 'text', rawOcrText = '') 
   const headerTitle = '✅ บันทึกรายการแล้ว';
   const channelLabel = channel === 'image' ? 'รูปภาพ' : 'ข้อความ';
   const typeLabel = isIncome ? 'รายรับ' : 'รายจ่าย';
+  const recordedTime = `${new Intl.DateTimeFormat('th-TH', {
+    timeZone: 'Asia/Bangkok',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).format(new Date())} น.`;
   const formattedAmount = `${sign}฿${Number(data.amount || 0).toLocaleString('th-TH', {
     minimumFractionDigits: 0,
     maximumFractionDigits: 2,
@@ -110,7 +116,7 @@ function buildTransactionReplyMessages(data, channel = 'text', rawOcrText = '') 
           },
           {
             type: 'text',
-            text: `${data.date} · ${typeLabel} (${data.category}) · ${channelLabel}`,
+            text: `${data.date} · ${recordedTime} · ${typeLabel} (${data.category}) · ${channelLabel}`,
             size: 'xs',
             color: '#6B7280',
             margin: 'xs',
