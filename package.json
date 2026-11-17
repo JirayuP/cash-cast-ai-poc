@@ -1,0 +1,29 @@
+{
+  "name": "cash-cast-ai-poc",
+  "version": "1.0.0",
+  "description": "Cash Cast AI - Proof of Concept (LINE OA Webhook + Tesseract OCR + Google Gemini API)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "tunnel": "npx untun@latest tunnel http://localhost:5000",
+    "test:pipeline": "node test-pipeline.js"
+  },
+  "keywords": [
+    "line-bot",
+    "tesseract-ocr",
+    "gemini-ai",
+    "cash-cast-ai",
+    "expense-tracker"
+  ],
+  "author": "Charinthorn Somprayoon & Jirayu Champa",
+  "license": "ISC",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.0",
+    "@line/bot-sdk": "^9.7.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "untun": "^0.2.2"
+  }
+}
