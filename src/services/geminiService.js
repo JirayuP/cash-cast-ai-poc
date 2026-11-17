@@ -81,6 +81,9 @@ async function generateStructuredJson(prompt) {
   let lastError = null;
 
   for (const modelName of candidateModels) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 12000); // Timeout 12 วินาทีต่อโมเดล เพื่อไม่ให้ LINE replyToken หมดอายุ
+
     try {
       const model = genAI.getGenerativeModel({
         model: modelName,
@@ -91,10 +94,14 @@ async function generateStructuredJson(prompt) {
         },
       });
 
-      const result = await model.generateContent(prompt);
+      const result = await model.generateContent(prompt, {
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
       const responseText = result.response.text();
       return JSON.parse(responseText);
     } catch (err) {
+      clearTimeout(timer);
       lastError = err;
       console.warn(
         `[Gemini Warning] โมเดล ${modelName} ไม่สามารถใช้งานได้ชั่วคราว (${

@@ -63,6 +63,37 @@ app.post(
 );
 
 /**
+ * ส่งข้อความตอบกลับทาง LINE โดยใช้ replyMessage ก่อน
+ * หาก replyToken หมดอายุ (เช่น OCR หรือ AI ใช้เวลานานเกิน 30 วินาที) จะสลับไปใช้ pushMessage อัตโนมัติ (ตามบทที่ 2 หัวข้อ 2.1.9)
+ * @param {string} replyToken
+ * @param {string} userId
+ * @param {Array<object>} messages
+ */
+async function sendReplyOrPush(replyToken, userId, messages) {
+  try {
+    return await messagingClient.replyMessage({
+      replyToken,
+      messages,
+    });
+  } catch (err) {
+    const isInvalidReplyToken =
+      err?.status === 400 ||
+      String(err?.body || err?.message || '').includes('Invalid reply token');
+
+    if (isInvalidReplyToken && userId && userId !== 'unknown_user') {
+      console.warn(
+        `⚠️ [LINE Notice] replyToken หมดอายุระหว่างรอประมวลผล กำลังส่งผ่าน pushMessage ไปยัง ${userId} แทน...`
+      );
+      return await messagingClient.pushMessage({
+        to: userId,
+        messages,
+      });
+    }
+    throw err;
+  }
+}
+
+/**
  * ฟังก์ชันประมวลผลแต่ละ Event ที่รับจาก LINE Official Account
  * @param {object} event
  */
@@ -79,7 +110,7 @@ async function handleLineEvent(event) {
     messagingClient
       .showLoadingAnimation({
         chatId: event.source.userId,
-        loadingSeconds: 15,
+        loadingSeconds: 20,
       })
       .catch(() => {});
   }
@@ -95,21 +126,18 @@ async function handleLineEvent(event) {
       // คำสั่งพิเศษสำหรับดูสรุปยอด In-Memory ในแชท
       if (['สรุป', 'ประวัติ', 'summary'].includes(userText.toLowerCase())) {
         const summary = memoryStore.getSummary(userId);
-        return await messagingClient.replyMessage({
-          replyToken,
-          messages: [
-            {
-              type: 'text',
-              text: [
-                `📊 สรุปรายการในหน่วยความจำ (In-Memory PoC)`,
-                `- จำนวนรายการ: ${summary.count} รายการ`,
-                `- รายรับรวม: +฿${summary.totalIncome.toLocaleString('th-TH')}`,
-                `- รายจ่ายรวม: -฿${summary.totalExpense.toLocaleString('th-TH')}`,
-                `- กระแสเงินสดสุทธิ: ฿${summary.netCashflow.toLocaleString('th-TH')}`,
-              ].join('\n'),
-            },
-          ],
-        });
+        return await sendReplyOrPush(replyToken, userId, [
+          {
+            type: 'text',
+            text: [
+              `📊 สรุปรายการในหน่วยความจำ (In-Memory PoC)`,
+              `- จำนวนรายการ: ${summary.count} รายการ`,
+              `- รายรับรวม: +฿${summary.totalIncome.toLocaleString('th-TH')}`,
+              `- รายจ่ายรวม: -฿${summary.totalExpense.toLocaleString('th-TH')}`,
+              `- กระแสเงินสดสุทธิ: ฿${summary.netCashflow.toLocaleString('th-TH')}`,
+            ].join('\n'),
+          },
+        ]);
       }
 
       // ส่งข้อความให้ Gemini API วิเคราะห์และแปลงเป็น JSON Schema
@@ -124,12 +152,9 @@ async function handleLineEvent(event) {
         rawInput: userText,
       });
 
-      // ตอบกลับผลลัพธ์ไปยังแชท LINE ทันที
+      // ตอบกลับผลลัพธ์ไปยังแชท LINE ทันที (พร้อมระบบสำรอง pushMessage)
       const replyMessages = buildTransactionReplyMessages(extractedData, 'text');
-      return await messagingClient.replyMessage({
-        replyToken,
-        messages: replyMessages,
-      });
+      return await sendReplyOrPush(replyToken, userId, replyMessages);
     }
 
     // =========================================================================
@@ -143,15 +168,12 @@ async function handleLineEvent(event) {
       const rawOcrText = await processLineImageOcr(blobClient, messageId);
 
       if (!rawOcrText) {
-        return await messagingClient.replyMessage({
-          replyToken,
-          messages: [
-            {
-              type: 'text',
-              text: '⚠️ ไม่สามารถอ่านข้อความจากรูปภาพได้ กรุณาส่งภาพสลิปหรือใบเสร็จที่ชัดเจนอีกครั้งครับ',
-            },
-          ],
-        });
+        return await sendReplyOrPush(replyToken, userId, [
+          {
+            type: 'text',
+            text: '⚠️ ไม่สามารถอ่านข้อความจากรูปภาพได้ กรุณาส่งภาพสลิปหรือใบเสร็จที่ชัดเจนอีกครั้งครับ',
+          },
+        ]);
       }
 
       // 4. ส่งข้อความดิบจาก OCR ให้ Gemini API สกัดและจัดหมวดหมู่ตาม JSON Schema
@@ -166,35 +188,31 @@ async function handleLineEvent(event) {
         rawInput: rawOcrText,
       });
 
-      // 6. ตอบกลับผลลัพธ์ไปยังแชท LINE ทันที
+      // 6. ตอบกลับผลลัพธ์ไปยังแชท LINE ทันที (พร้อมระบบสำรอง pushMessage)
       const replyMessages = buildTransactionReplyMessages(extractedData, 'image', rawOcrText);
-      return await messagingClient.replyMessage({
-        replyToken,
-        messages: replyMessages,
-      });
+      return await sendReplyOrPush(replyToken, userId, replyMessages);
     }
 
     // กรณีส่งข้อมูลประเภทอื่นที่ยังไม่รองรับใน PoC รอบนี้
-    return await messagingClient.replyMessage({
-      replyToken,
-      messages: [
-        {
-          type: 'text',
-          text: '💡 ระบบ Cash Cast AI (PoC) รองรับการส่ง "ข้อความ" (เช่น ข้าวมันไก่ 50 บาท) และ "รูปภาพสลิป/ใบเสร็จ" ครับ',
-        },
-      ],
-    });
+    return await sendReplyOrPush(replyToken, userId, [
+      {
+        type: 'text',
+        text: '💡 ระบบ Cash Cast AI (PoC) รองรับการส่ง "ข้อความ" (เช่น ข้าวมันไก่ 50 บาท) และ "รูปภาพสลิป/ใบเสร็จ" ครับ',
+      },
+    ]);
   } catch (error) {
-    console.error(`[Event Processing Error] (${event.message.type}):`, error);
-    return await messagingClient.replyMessage({
-      replyToken,
-      messages: [
+    console.error(`[Event Processing Error] (${event.message.type}):`, error.message);
+    try {
+      return await sendReplyOrPush(replyToken, userId, [
         {
           type: 'text',
           text: `❌ เกิดข้อผิดพลาดในการประมวลผล:\n${error.message}`,
         },
-      ],
-    });
+      ]);
+    } catch (sendErr) {
+      console.error('[Failed to send error notification to LINE]:', sendErr.message);
+      return null;
+    }
   }
 }
 

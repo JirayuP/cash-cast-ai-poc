@@ -9,8 +9,8 @@ const config = {
   },
   gemini: {
     apiKey: (process.env.GEMINI_API_KEY || '').trim(),
-    model: (process.env.GEMINI_MODEL || 'gemini-3-flash-preview').trim(),
-    fallbackModels: ['gemini-3-flash-preview', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'],
+    model: (process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite').trim(),
+    fallbackModels: ['gemini-3.1-flash-lite', 'gemini-3-flash-preview', 'gemini-3.8-flash'],
   },
   ocr: {
     pythonPath: process.env.PYTHON_PATH || 'python',
