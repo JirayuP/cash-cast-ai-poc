@@ -1,3 +1,4 @@
+const fs = require('fs');
 const { GoogleGenerativeAI, SchemaType } = require('@google/generative-ai');
 const config = require('../config/env');
 
@@ -179,8 +180,54 @@ ${rawOcrText}
   return await generateStructuredJson(prompt);
 }
 
+/**
+ * ระบบสำรอง (Fallback): วิเคราะห์รูปภาพสลิป/ใบเสร็จด้วย Gemini Vision โดยตรง
+ * กรณีที่สภาพแวดล้อม Cloud ไม่สามารถรันไบนารี Python/Tesseract ได้
+ * @param {string} imagePath
+ * @returns {Promise<object>} ข้อมูลธุรกรรมตาม JSON Schema
+ */
+async function extractTransactionFromImageFile(imagePath) {
+  const today = getTodayDateString();
+  const imageBuffer = await fs.promises.readFile(imagePath);
+
+  const prompt = `
+คุณคือระบบ AI อัจฉริยะของ "Cash Cast AI" ทำหน้าที่อ่านและสกัดข้อมูลจากรูปภาพ "สลิปโอนเงินธนาคาร" หรือ "ใบเสร็จรับเงิน (เช่น 7-Eleven, ร้านค้า, คาเฟ่)"
+วันที่ปัจจุบันคือ: ${today}
+
+คำสั่ง:
+1. หากเป็น "ใบเสร็จร้านค้า (เช่น 7-Eleven)":
+   - type: "expense"
+   - title: ชื่อร้านค้า (เช่น "7-Eleven" หรือชื่อร้านที่ปรากฏ)
+   - amount: ยอดรวมสุทธิ (Total / รวมเงิน)
+   - category: เลือกตามประเภทสินค้าหลัก เช่น "อาหาร", "ช้อปปิ้ง", "อื่นๆ"
+   - items: สกัดรายการสินค้าแต่ละชิ้นและราคาใส่ในอาเรย์ items
+2. หากเป็น "สลิปธนาคาร / โอนเงิน / เติมเงิน":
+   - type: "expense" (โอนเงินออก/เติมเงิน/จ่ายบิล/สแกนจ่าย) หรือ "income" (รับเงินโอนเข้า)
+   - title: สรุปรายการโอนเงินหรือชื่อผู้รับ/ร้านค้า (เช่น "เติมเงิน GrabPay Wallet", "โอนเงินไปยัง ...")
+   - amount: จำนวนเงินที่ทำรายการสำเร็จ
+   - category: จัดหมวดหมู่ตามชื่อผู้รับหรือบันทึกช่วยจำ ("อาหาร", "เดินทาง", "ช้อปปิ้ง", "สาธารณูปโภค", "เงินเดือน", "อื่นๆ")
+   - items: []
+3. date: สกัดวันที่จากสลิปหรือใบเสร็จในรูปแบบ YYYY-MM-DD (หากปีเป็น พ.ศ. เช่น 69 คือ 2569 -> 2026)
+
+จงตอบกลับเป็น JSON ตาม Schema ที่กำหนดเท่านั้น
+`.trim();
+
+  const contentParts = [
+    prompt,
+    {
+      inlineData: {
+        data: imageBuffer.toString('base64'),
+        mimeType: 'image/jpeg',
+      },
+    },
+  ];
+
+  return await generateStructuredJson(contentParts);
+}
+
 module.exports = {
   extractTransactionFromText,
   extractTransactionFromOcr,
+  extractTransactionFromImageFile,
   getTodayDateString,
 };

@@ -6,12 +6,15 @@ const {
   extractTransactionFromText,
   extractTransactionFromOcr,
 } = require('./services/geminiService');
-const { processLineImageOcr, runTesseractOcr } = require('./services/ocrService');
+const { processLineImageAndExtract, runTesseractOcr } = require('./services/ocrService');
 const { buildTransactionReplyMessages } = require('./services/flexMessageService');
 const memoryStore = require('./store/memoryStore');
 
 const app = express();
 app.use(cors());
+
+// เก็บ ID ของ Event/Message ที่ประมวลผลไปแล้ว เพื่อป้องกันการประมวลผลซ้ำเมื่อ LINE ส่ง Redelivery
+const processedEventIds = new Set();
 
 // ตั้งค่า LINE SDK Clients
 const lineConfig = {
@@ -48,17 +51,17 @@ app.post(
       next();
     });
   },
-  async (req, res) => {
+  (req, res) => {
     const events = req.body.events || [];
     console.log(`✅ [Webhook Verified] จำนวน Events ที่ได้รับ: ${events.length}`);
 
-    try {
-      await Promise.all(events.map((event) => handleLineEvent(event)));
-      return res.status(200).json({ status: 'ok' });
-    } catch (err) {
-      console.error('[Webhook Error]:', err);
-      return res.status(500).json({ status: 'error', message: err.message });
-    }
+    // ตอบกลับ HTTP 200 OK ให้ LINE Platform ทันที เพื่อไม่ให้ LINE มองว่า Timeout แล้วส่งข้อความเก่าซ้ำ (Redelivery)
+    res.status(200).json({ status: 'ok' });
+
+    // ประมวลผลแต่ละ Event แบบ Asynchronous ในเบื้องหลัง
+    Promise.all(events.map((event) => handleLineEvent(event))).catch((err) => {
+      console.error('[Background Webhook Error]:', err.message);
+    });
   }
 );
 
@@ -100,6 +103,21 @@ async function sendReplyOrPush(replyToken, userId, messages) {
 async function handleLineEvent(event) {
   if (event.type !== 'message') {
     return null;
+  }
+
+  // ป้องกันการประมวลผลข้อความเดิมซ้ำ (กรณี LINE ส่ง Redelivery หรือ Retry)
+  const dedupeKey = event.message?.id || event.webhookEventId;
+  if (dedupeKey) {
+    if (processedEventIds.has(dedupeKey)) {
+      console.warn(`⚠️ [Dedupe] ข้ามการประมวลผลข้อความซ้ำ (messageId: ${dedupeKey})`);
+      return null;
+    }
+    processedEventIds.add(dedupeKey);
+    // จำกัดขนาด Set ไม่ให้เกิน 1,000 รายการในหน่วยความจำ
+    if (processedEventIds.size > 1000) {
+      const oldest = processedEventIds.values().next().value;
+      processedEventIds.delete(oldest);
+    }
   }
 
   const userId = event.source?.userId || 'unknown_user';
@@ -164,23 +182,11 @@ async function handleLineEvent(event) {
       const messageId = event.message.id;
       console.log(`\n[LINE Image] จาก ${userId}, messageId: ${messageId}`);
 
-      // 1. ดาวน์โหลดรูปลง Temp -> 2. รัน Python Tesseract OCR (tha+eng) -> 3. ลบไฟล์ Temp ทันที
-      const rawOcrText = await processLineImageOcr(blobClient, messageId);
+      // 1. ดาวน์โหลดรูปลง Temp -> 2. รัน Python Tesseract OCR (พร้อม Fallback Gemini Vision) -> 3. ลบไฟล์ Temp ทันที
+      const { extractedData, rawOcrText } = await processLineImageAndExtract(blobClient, messageId);
+      console.log('[Gemini Extracted - Image]:', JSON.stringify(extractedData, null, 2));
 
-      if (!rawOcrText) {
-        return await sendReplyOrPush(replyToken, userId, [
-          {
-            type: 'text',
-            text: '⚠️ ไม่สามารถอ่านข้อความจากรูปภาพได้ กรุณาส่งภาพสลิปหรือใบเสร็จที่ชัดเจนอีกครั้งครับ',
-          },
-        ]);
-      }
-
-      // 4. ส่งข้อความดิบจาก OCR ให้ Gemini API สกัดและจัดหมวดหมู่ตาม JSON Schema
-      const extractedData = await extractTransactionFromOcr(rawOcrText);
-      console.log('[Gemini Extracted - Image OCR]:', JSON.stringify(extractedData, null, 2));
-
-      // 5. บันทึกใน In-Memory Store
+      // 4. บันทึกใน In-Memory Store
       memoryStore.addTransaction({
         userId,
         channel: 'image',
@@ -188,7 +194,7 @@ async function handleLineEvent(event) {
         rawInput: rawOcrText,
       });
 
-      // 6. ตอบกลับผลลัพธ์ไปยังแชท LINE ทันที (พร้อมระบบสำรอง pushMessage)
+      // 5. ตอบกลับผลลัพธ์ไปยังแชท LINE ทันที (พร้อมระบบสำรอง pushMessage)
       const replyMessages = buildTransactionReplyMessages(extractedData, 'image', rawOcrText);
       return await sendReplyOrPush(replyToken, userId, replyMessages);
     }

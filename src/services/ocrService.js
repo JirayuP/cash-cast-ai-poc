@@ -4,6 +4,10 @@ const { pipeline } = require('stream/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const config = require('../config/env');
+const {
+  extractTransactionFromOcr,
+  extractTransactionFromImageFile,
+} = require('./geminiService');
 
 const execFileAsync = promisify(execFile);
 
@@ -26,6 +30,21 @@ async function downloadLineImageToTemp(blobClient, messageId) {
 }
 
 /**
+ * ค้นหาคำสั่ง Python ที่ใช้งานได้จริงทั้งบน Linux (Docker / Railway) และ Windows
+ */
+function getPythonCandidates() {
+  const candidates = [];
+  if (fs.existsSync('/opt/venv/bin/python')) {
+    candidates.push('/opt/venv/bin/python');
+  }
+  if (config.ocr.pythonPath) {
+    candidates.push(config.ocr.pythonPath);
+  }
+  candidates.push('python3', 'python');
+  return [...new Set(candidates)];
+}
+
+/**
  * เรียกใช้ Python Script (pytesseract) ผ่าน child_process เพื่อสกัดข้อความจากภาพ (tha+eng)
  * @param {string} imagePath - Path ของไฟล์รูปภาพ
  * @returns {Promise<string>} ข้อความดิบที่อ่านได้จาก Tesseract OCR
@@ -36,53 +55,83 @@ async function runTesseractOcr(imagePath) {
     PYTHONIOENCODING: 'utf-8',
   };
 
-  if (config.ocr.tesseractCmd) {
+  // ส่ง TESSERACT_CMD เฉพาะเมื่อไฟล์มีอยู่จริงใน OS นั้นๆ (ป้องกันค่า Windows Path ไปทับค่า Linux บน Railway)
+  if (config.ocr.tesseractCmd && fs.existsSync(config.ocr.tesseractCmd)) {
     envVars.TESSERACT_CMD = config.ocr.tesseractCmd;
+  } else {
+    delete envVars.TESSERACT_CMD;
   }
 
-  try {
-    const { stdout, stderr } = await execFileAsync(
-      config.ocr.pythonPath,
-      [config.ocr.scriptPath, imagePath, 'tha+eng'],
-      {
-        env: envVars,
-        encoding: 'utf-8',
-        timeout: 30000, // Timeout 30 วินาที
-        maxBuffer: 10 * 1024 * 1024,
+  const pythonCandidates = getPythonCandidates();
+  let lastError = null;
+
+  for (const pyCmd of pythonCandidates) {
+    try {
+      const { stdout, stderr } = await execFileAsync(
+        pyCmd,
+        [config.ocr.scriptPath, imagePath, 'tha+eng'],
+        {
+          env: envVars,
+          encoding: 'utf-8',
+          timeout: 25000,
+          maxBuffer: 10 * 1024 * 1024,
+        }
+      );
+
+      if (stderr && stderr.trim()) {
+        console.warn('[OCR Warning]:', stderr.trim());
       }
-    );
 
-    if (stderr && stderr.trim()) {
-      console.warn('[OCR Warning]:', stderr.trim());
+      return (stdout || '').trim();
+    } catch (error) {
+      lastError = error;
+      // หากเกิด ENOENT (ไม่พบคำสั่ง python ชื่อนั้น) ให้ลองคำสั่งถัดไป เช่น python3
+      if (error.code === 'ENOENT') {
+        continue;
+      }
+      break;
     }
-
-    return (stdout || '').trim();
-  } catch (error) {
-    const errDetail = error.stderr || error.message;
-    throw new Error(`การรัน Tesseract OCR ล้มเหลว: ${errDetail}`);
   }
+
+  const errDetail = lastError?.stderr || lastError?.message || 'Unknown OCR error';
+  throw new Error(`การรัน Tesseract OCR ล้มเหลว: ${errDetail}`);
 }
 
 /**
  * Pipeline สำหรับรูปภาพจาก LINE:
  * 1. ดาวน์โหลดรูปภาพลง Temp File
- * 2. เรียก Python Tesseract OCR (tha+eng)
+ * 2. เรียก Python Tesseract OCR (tha+eng) -> ส่งข้อความดิบให้ Gemini API
+ *    (หากสภาพแวดล้อม Cloud ไม่มี Python/Tesseract จะสลับไปใช้ Gemini Vision อ่านภาพโดยตรงอัตโนมัติ)
  * 3. ลบ Temp File ทันทีหลังอ่านเสร็จ (ใน finally block)
  *
  * @param {import('@line/bot-sdk').messagingApi.MessagingApiBlobClient} blobClient
  * @param {string} messageId
- * @returns {Promise<string>} ข้อความที่สกัดได้จากรูปภาพ
+ * @returns {Promise<{ extractedData: object, rawOcrText: string }>}
  */
-async function processLineImageOcr(blobClient, messageId) {
+async function processLineImageAndExtract(blobClient, messageId) {
   let tempFilePath = null;
   try {
     tempFilePath = await downloadLineImageToTemp(blobClient, messageId);
     console.log(`[OCR] บันทึกไฟล์ชั่วคราวที่: ${tempFilePath}`);
 
-    const ocrText = await runTesseractOcr(tempFilePath);
-    console.log(`[OCR] ข้อความที่สกัดได้ (${ocrText.length} ตัวอักษร):\n${ocrText}`);
+    let rawOcrText = '';
+    try {
+      rawOcrText = await runTesseractOcr(tempFilePath);
+      console.log(`[OCR] ข้อความที่สกัดได้ (${rawOcrText.length} ตัวอักษร):\n${rawOcrText}`);
+    } catch (ocrErr) {
+      console.warn(
+        `[OCR Fallback] ไม่สามารถรัน Tesseract OCR ได้ (${ocrErr.message}) กำลังสลับไปใช้ Gemini Vision วิเคราะห์ภาพโดยตรง...`
+      );
+    }
 
-    return ocrText;
+    if (rawOcrText && rawOcrText.trim().length > 0) {
+      const extractedData = await extractTransactionFromOcr(rawOcrText);
+      return { extractedData, rawOcrText };
+    }
+
+    // Fallback: ใช้ Gemini Vision อ่านจากไฟล์ภาพชั่วคราวโดยตรงก่อนลบทิ้ง
+    const extractedData = await extractTransactionFromImageFile(tempFilePath);
+    return { extractedData, rawOcrText: '[Extracted via Gemini Vision Fallback]' };
   } finally {
     // ลบไฟล์ชั่วคราวทันทีหลังประมวลผลเสร็จตามเงื่อนไข PoC
     if (tempFilePath) {
@@ -99,5 +148,5 @@ async function processLineImageOcr(blobClient, messageId) {
 module.exports = {
   downloadLineImageToTemp,
   runTesseractOcr,
-  processLineImageOcr,
+  processLineImageAndExtract,
 };

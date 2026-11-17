@@ -14,11 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# สร้าง Python Virtual Environment และติดตั้งไลบรารี OCR
+# สร้าง Python Virtual Environment และติดตั้งไลบรารี OCR พร้อมทำ Symlink ให้เรียก python หรือ python3 ได้เสมอ
 COPY requirements.txt ./
 RUN python3 -m venv /opt/venv \
     && /opt/venv/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/venv/bin/pip install --no-cache-dir pytesseract Pillow opencv-python-headless numpy
+    && /opt/venv/bin/pip install --no-cache-dir pytesseract Pillow opencv-python-headless numpy \
+    && ln -sf /opt/venv/bin/python /usr/local/bin/python \
+    && ln -sf /opt/venv/bin/python /usr/local/bin/python3
 
 # ติดตั้ง Node.js Dependencies
 COPY package*.json ./
