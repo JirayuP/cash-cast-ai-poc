@@ -10,13 +10,24 @@ const config = require('../config/env');
  * @returns {Array<object>} อาเรย์ของ LINE Message Objects สำหรับส่งใน replyMessage
  */
 function buildTransactionReplyMessages(data, channel = 'text', rawOcrText = '') {
+  const isVisionFallback =
+    channel === 'image' && rawOcrText === '[Extracted via Gemini Vision Fallback]';
   const isIncome = data.type === 'income';
   const sign = isIncome ? '+' : '-';
   const amountColor = isIncome ? '#16A34A' : '#EA580C';
   const badgeColor = channel === 'image' ? '#2563EB' : '#16A34A';
   const headerTitle =
-    channel === 'image' ? '📄 อ่านใบเสร็จ/สลิปด้วย OCR สำเร็จ' : '✅ บันทึกรายการแล้ว';
-  const channelLabel = channel === 'image' ? 'รูปภาพ (OCR)' : 'ข้อความ';
+    channel === 'image'
+      ? isVisionFallback
+        ? '✨ อ่านสลิป/ใบเสร็จด้วย Gemini Vision สำเร็จ'
+        : '📄 อ่านสลิป/ใบเสร็จด้วย Tesseract OCR สำเร็จ'
+      : '✅ บันทึกรายการแล้ว';
+  const channelLabel =
+    channel === 'image'
+      ? isVisionFallback
+        ? 'รูปภาพ (Gemini Vision)'
+        : 'รูปภาพ (Tesseract OCR)'
+      : 'ข้อความ';
   const typeLabel = isIncome ? 'รายรับ' : 'รายจ่าย';
   const formattedAmount = `${sign}฿${Number(data.amount || 0).toLocaleString('th-TH', {
     minimumFractionDigits: 0,
